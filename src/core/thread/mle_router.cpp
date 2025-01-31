@@ -1720,32 +1720,6 @@ void MleRouter::HandleTimeTick(void)
 
         age = TimerMilli::GetNow() - router.GetLastHeard();
 
-        if (router.IsStateValid() && (age >= kMaxNeighborAge))
-        {
-            bool sendLinkRequest = true;
-
-            // Once router age expires, we send Link Request every
-            // time tick (second), up to `kMaxTxCount`. Each rx is
-            // randomly delayed (one second window). After the last
-            // attempt, we wait for the "Link Accept" timeout
-            // (~3 seconds), before the router is removed.
-
-            if (!router.IsWaitingForLinkAccept())
-            {
-                LogInfo("No Adv from router 0x%04x - sending Link Request", router.GetRloc16());
-            }
-            else
-            {
-                sendLinkRequest = (age < kMaxNeighborAge + kMaxTxCount * TimeMilli::kOneSecondInMsec);
-            }
-
-            if (sendLinkRequest)
-            {
-                mDelayedSender.ScheduleLinkRequest(
-                    router, Random::NonCrypto::GetUint32InRange(0, kMaxLinkRequestDelayOnRouter));
-            }
-        }
-
 #if OPENTHREAD_CONFIG_PARENT_SEARCH_ENABLE
         router.DecrementParentReselectTimeout();
 
@@ -1754,6 +1728,53 @@ void MleRouter::HandleTimeTick(void)
             router.SetSelectableAsParent(false);
         }
 #endif
+        if (router.IsStateValid())
+        {
+            // Neighbor router age and link recovery
+            //
+            // If the device is an FTD child and has more than
+            // `mChildRouterLinks` neighbors, it uses a longer age,
+            // `kMaxNeighborAgeOnChild`, and removes the neighboring
+            // router upon expiration without trying to re-establish
+            // its link with it.
+            //
+            // Otherwise, if the device itself is a router, or it is an
+            // FTD child with `mChildRouterLinks` or fewer neighbors,
+            // it uses a shorter `kMaxNeighborAge`. Upon expiration, it
+            // tries to re-establish its link with the neighboring router.
+
+            if (IsChild() && (mRouterTable.GetNeighborCount(kLinkQuality1) > mChildRouterLinks))
+            {
+                if (age >= kMaxNeighborAgeOnChild)
+                {
+                    LogInfo("No Adv from router 0x%04x - removing router", router.GetRloc16());
+                    mDelayedSender.RemoveScheduledLinkRequest(router);
+                    RemoveNeighbor(router);
+                    continue;
+                }
+            }
+            else if (age >= kMaxNeighborAge)
+            {
+                // We send a Link Request every time tick (second), up to
+                // max attempts. Each transmission is randomly delayed
+                // (one-second window). After the last attempt, we wait for
+                // the "Link Accept" timeout (~3 seconds) before removing the
+                // neighboring router.
+
+                if (!mDelayedSender.HasAnyScheduledLinkRequest(router) && !router.IsWaitingForLinkAccept())
+                {
+                    LogInfo("No Adv from router 0x%04x - sending Link Request", router.GetRloc16());
+                    router.SetLinkRequestAttemptsToMax();
+                }
+
+                if (router.HasRemainingLinkRequestAttempts())
+                {
+                    router.DecrementLinkRequestAttempts();
+                    mDelayedSender.ScheduleLinkRequest(
+                        router, Random::NonCrypto::GetUint32InRange(0, kMaxLinkRequestDelayOnRouter));
+                }
+            }
+        }
 
         if (router.IsWaitingForLinkAccept() && (router.DecrementLinkAcceptTimeout() == 0))
         {
