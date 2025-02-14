@@ -459,45 +459,52 @@ template <> otError Interpreter::Process<Cmd("ba")>(Arg aArgs[])
      */
     if (aArgs[0] == "port")
     {
-        OutputLine("%hu", otBorderAgentGetUdpPort(GetInstancePtr()));
+        OutputLine("%u", otBorderAgentGetUdpPort(GetInstancePtr()));
     }
     /**
      * @cli ba state
      * @code
      * ba state
-     * Started
+     * Active
      * Done
      * @endcode
      * @par api_copy
-     * #otBorderAgentGetState
+     * #otBorderAgentIsActive
      */
     else if (aArgs[0] == "state")
     {
-        static const char *const kStateStrings[] = {
-            "Stopped", // (0) OT_BORDER_AGENT_STATE_STOPPED
-            "Started", // (1) OT_BORDER_AGENT_STATE_STARTED
-            "Active",  // (2) OT_BORDER_AGENT_STATE_ACTIVE
-        };
-
-        static_assert(0 == OT_BORDER_AGENT_STATE_STOPPED, "OT_BORDER_AGENT_STATE_STOPPED value is incorrect");
-        static_assert(1 == OT_BORDER_AGENT_STATE_STARTED, "OT_BORDER_AGENT_STATE_STARTED value is incorrect");
-        static_assert(2 == OT_BORDER_AGENT_STATE_ACTIVE, "OT_BORDER_AGENT_STATE_ACTIVE value is incorrect");
-
-        OutputLine("%s", Stringify(otBorderAgentGetState(GetInstancePtr()), kStateStrings));
+        OutputLine("%s", otBorderAgentIsActive(GetInstancePtr()) ? "Active" : "Inactive");
     }
     /**
-     * @cli ba disconnect
+     * @cli ba sessions
      * @code
-     * ba disconnect
+     * ba sessions
+     * [fe80:0:0:0:cc79:2a29:d311:1aea]:9202 connected:yes commissioner:no lifetime:1860
      * Done
      * @endcode
      * @par
-     * Disconnects the Border Agent from any active secure sessions
-     * @sa otBorderAgentDisconnect
+     * Prints the list of Border Agent's sessions. Information per session:
+     * * Peer socket address (IPv6 address and port).
+     * * Whether or not the session is connected.
+     * * Whether or not the session is accepted as full commissioner.
+     * * Session lifetime in milliseconds (calculated from the time the session was first established).
      */
-    else if (aArgs[0] == "disconnect")
+    else if (aArgs[0] == "sessions")
     {
-        otBorderAgentDisconnect(GetInstancePtr());
+        otBorderAgentSessionIterator iterator;
+        otBorderAgentSessionInfo     info;
+        char                         sockAddrString[OT_IP6_SOCK_ADDR_STRING_SIZE];
+        Uint64StringBuffer           lifetimeString;
+
+        otBorderAgentInitSessionIterator(GetInstancePtr(), &iterator);
+
+        while (otBorderAgentGetNextSessionInfo(&iterator, &info) == OT_ERROR_NONE)
+        {
+            otIp6SockAddrToString(&info.mPeerSockAddr, sockAddrString, sizeof(sockAddrString));
+
+            OutputLine("%s connected:%s commissioner:%s lifetime:%s", sockAddrString, info.mIsConnected ? "yes" : "no",
+                       info.mIsCommissioner ? "yes" : "no", Uint64ToString(info.mLifetime, lifetimeString));
+        }
     }
 #if OPENTHREAD_CONFIG_BORDER_AGENT_ID_ENABLE
     /**
@@ -540,30 +547,53 @@ template <> otError Interpreter::Process<Cmd("ba")>(Arg aArgs[])
 #if OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
     else if (aArgs[0] == "ephemeralkey")
     {
+        bool enable;
+
         /**
          * @cli ba ephemeralkey
          * @code
          * ba ephemeralkey
-         * active
+         * Stopped
          * Done
          * @endcode
          * @par api_copy
-         * #otBorderAgentIsEphemeralKeyActive
+         * #otBorderAgentEphemeralKeyGetState
          */
         if (aArgs[1].IsEmpty())
         {
-            OutputLine("%sactive", otBorderAgentIsEphemeralKeyActive(GetInstancePtr()) ? "" : "in");
+            otBorderAgentEphemeralKeyState state = otBorderAgentEphemeralKeyGetState(GetInstancePtr());
+
+            OutputLine("%s", otBorderAgentEphemeralKeyStateToString(state));
         }
         /**
-         * @cli ba ephemeralkey set <keystring> [timeout-in-msec] [port]
+         * @cli ba ephemeralkey (enable, disable)
          * @code
-         * ba ephemeralkey set Z10X20g3J15w1000P60m16 5000 1234
+         * ba ephemeralkey enable
          * Done
          * @endcode
+         * @code
+         * ba ephemeralkey
+         * Enabled
+         * Done
+         * @endcode
+         * @cparam ba ephemeralkey @ca{enable|disable}
          * @par api_copy
-         * #otBorderAgentSetEphemeralKey
+         * #otBorderAgentEphemeralKeySetEnabled
          */
-        else if (aArgs[1] == "set")
+        else if (ProcessEnableDisable(aArgs + 1, otBorderAgentEphemeralKeySetEnabled) == OT_ERROR_NONE)
+        {
+        }
+        /**
+         * @cli ba ephemeralkey start <keystring> [timeout-in-msec] [port]
+         * @code
+         * ba ephemeralkey start Z10X20g3J15w1000P60m16 5000 1234
+         * Done
+         * @endcode
+         * @cparam ba ephemeralkey start @ca{keystring} [@ca{timeout-in-msec}] [@ca{port}]
+         * @par api_copy
+         * #otBorderAgentEphemeralKeyStart
+         */
+        else if (aArgs[1] == "start")
         {
             uint32_t timeout = 0;
             uint16_t port    = 0;
@@ -580,69 +610,63 @@ template <> otError Interpreter::Process<Cmd("ba")>(Arg aArgs[])
                 SuccessOrExit(error = aArgs[4].ParseAsUint16(port));
             }
 
-            error = otBorderAgentSetEphemeralKey(GetInstancePtr(), aArgs[2].GetCString(), timeout, port);
+            error = otBorderAgentEphemeralKeyStart(GetInstancePtr(), aArgs[2].GetCString(), timeout, port);
         }
         /**
-         * @cli ba ephemeralkey clear
+         * @cli ba ephemeralkey stop
          * @code
-         * ba ephemeralkey clear
+         * ba ephemeralkey stop
          * Done
          * @endcode
          * @par api_copy
-         * #otBorderAgentClearEphemeralKey
+         * #otBorderAgentEphemeralKeyStop
          */
-        else if (aArgs[1] == "clear")
+        else if (aArgs[1] == "stop")
         {
-            otBorderAgentClearEphemeralKey(GetInstancePtr());
+            otBorderAgentEphemeralKeyStop(GetInstancePtr());
+        }
+        /**
+         * @cli ba ephemeralkey port
+         * @code
+         * ba ephemeralkey port
+         * 49153
+         * Done
+         * @endcode
+         * @par api_copy
+         * #otBorderAgentEphemeralKeyGetUdpPort
+         */
+        else if (aArgs[1] == "port")
+        {
+            OutputLine("%u", otBorderAgentEphemeralKeyGetUdpPort(GetInstancePtr()));
         }
         /**
          * @cli ba ephemeralkey callback (enable, disable)
          * @code
          * ba ephemeralkey callback enable
          * Done
-         * ba ephemeralkey set W10X1 5000 49155
-         * Done
-         * BorderAgent callback: Ephemeral key active, port:49155
-         * BorderAgent callback: Ephemeral key inactive
          * @endcode
+         * @code
+         * ba ephemeralkey start W10X10 5000 49155
+         * Done
+         * BorderAgentEphemeralKey callback - state:Started
+         * BorderAgentEphemeralKey callback - state:Connected
+         * @endcode
+         * @cparam ba ephemeralkey callback @ca{enable|disable}
          * @par api_copy
-         * #otBorderAgentSetEphemeralKeyCallback
+         * #otBorderAgentEphemeralKeySetCallback
          */
         else if (aArgs[1] == "callback")
         {
-            bool enable;
-
             SuccessOrExit(error = ParseEnableOrDisable(aArgs[2], enable));
 
             if (enable)
             {
-                otBorderAgentSetEphemeralKeyCallback(GetInstancePtr(), HandleBorderAgentEphemeralKeyStateChange, this);
+                otBorderAgentEphemeralKeySetCallback(GetInstancePtr(), HandleBorderAgentEphemeralKeyStateChange, this);
             }
             else
             {
-                otBorderAgentSetEphemeralKeyCallback(GetInstancePtr(), nullptr, nullptr);
+                otBorderAgentEphemeralKeySetCallback(GetInstancePtr(), nullptr, nullptr);
             }
-        }
-        /**
-         * @cli ba ephemeralkey feature (enable, disable)
-         * @code
-         * ba ephemeralkey feature
-         * Enabled
-         * Done
-         * @endcode
-         * @code
-         * ba ephemeralkey feature enable
-         * Done
-         * @endcode
-         * @cparam ba ephemeralkey feature [@ca{enable|disable}]
-         * @par api_copy
-         * #otBorderAgentIsEphemeralKeyFeatureEnabled
-         * #otBorderAgentSetEphemeralKeyFeatureEnabled
-         */
-        else if (aArgs[1] == "feature")
-        {
-            error = ProcessEnableDisable(aArgs + 2, otBorderAgentIsEphemeralKeyFeatureEnabled,
-                                         otBorderAgentSetEphemeralKeyFeatureEnabled);
         }
         else
         {
@@ -732,16 +756,9 @@ void Interpreter::HandleBorderAgentEphemeralKeyStateChange(void *aContext)
 
 void Interpreter::HandleBorderAgentEphemeralKeyStateChange(void)
 {
-    bool active = otBorderAgentIsEphemeralKeyActive(GetInstancePtr());
+    otBorderAgentEphemeralKeyState state = otBorderAgentEphemeralKeyGetState(GetInstancePtr());
 
-    OutputFormat("BorderAgent callback: Ephemeral key %sactive", active ? "" : "in");
-
-    if (active)
-    {
-        OutputFormat(", port:%u", otBorderAgentGetUdpPort(GetInstancePtr()));
-    }
-
-    OutputNewLine();
+    OutputLine("BorderAgentEphemeralKey callback - state:%s", otBorderAgentEphemeralKeyStateToString(state));
 }
 #endif
 
@@ -867,32 +884,33 @@ template <> otError Interpreter::Process<Cmd("nat64")>(Arg aArgs[])
      * @cli nat64 mappings
      * @code
      * nat64 mappings
-     * |          | Address                   |        | 4 to 6       | 6 to 4       |
-     * +----------+---------------------------+--------+--------------+--------------+
-     * | ID       | IPv6       | IPv4         | Expiry | Pkts | Bytes | Pkts | Bytes |
-     * +----------+------------+--------------+--------+------+-------+------+-------+
-     * | 00021cb9 | fdc7::df79 | 192.168.64.2 |  7196s |    6 |   456 |   11 |  1928 |
-     * |          |                                TCP |    0 |     0 |    0 |     0 |
-     * |          |                                UDP |    1 |   136 |   16 |  1608 |
-     * |          |                               ICMP |    5 |   320 |    5 |   320 |
+     * |          | Address                   | Ports or ICMP Ids |        | 4 to 6       | 6 to 4       |
+     * +----------+---------------------------+-----------------------+--------+--------------+--------------+
+     * | ID       | IPv6       | IPv4         |   v6    |   v4    | Expiry | Pkts | Bytes | Pkts | Bytes |
+     * +----------+------------+--------------+-----------------------+--------+------+-------+------+-------+
+     * | 00021cb9 | fdc7::df79 | 192.168.64.2 |  65100  |  65200  |  7196s |    6 |   456 |   11 |  1928 |
+     * |                                                               TCP |    0 |     0 |    0 |     0 |
+     * |                                                               UDP |    1 |   136 |   16 |  1608 |
+     * |                                                              ICMP |    5 |   320 |    5 |   320 |
      * @endcode
      * @par api_copy
      * #otNat64GetNextAddressMapping
      */
     else if (aArgs[0] == "mappings")
     {
-        static const char *const kNat64StatusLevel1Title[] = {"", "Address", "", "4 to 6", "6 to 4"};
+        static const char *const kNat64StatusLevel1Title[] = {"", "Address", "Ports or ICMP Ids",
+                                                              "", "4 to 6",  "6 to 4"};
 
         static const uint8_t kNat64StatusLevel1ColumnWidths[] = {
-            18, 61, 8, 25, 25,
+            18, 61, 19, 8, 25, 25,
         };
 
         static const char *const kNat64StatusTableHeader[] = {
-            "ID", "IPv6", "IPv4", "Expiry", "Pkts", "Bytes", "Pkts", "Bytes",
+            "ID", "IPv6", "IPv4", "v6", "v4", "Expiry", "Pkts", "Bytes", "Pkts", "Bytes",
         };
 
         static const uint8_t kNat64StatusTableColumnWidths[] = {
-            18, 42, 18, 8, 10, 14, 10, 14,
+            18, 42, 18, 9, 9, 8, 10, 14, 10, 14,
         };
 
         otNat64AddressMappingIterator iterator;
@@ -914,19 +932,26 @@ template <> otError Interpreter::Process<Cmd("nat64")>(Arg aArgs[])
                          ToUlong(static_cast<uint32_t>(mapping.mId & 0xffffffff)));
             OutputFormat("| %40s ", ip6AddressString);
             OutputFormat("| %16s ", ip4AddressString);
+#if OPENTHREAD_CONFIG_NAT64_PORT_TRANSLATION_ENABLE
+            OutputFormat("| %6u  ", mapping.mSrcPortOrId);
+            OutputFormat("| %6u  ", mapping.mTranslatedPortOrId);
+#else
+            OutputFormat("|   N/A   ");
+            OutputFormat("|   N/A   ");
+#endif
             OutputFormat("| %5lus ", ToUlong(mapping.mRemainingTimeMs / 1000));
             OutputNat64Counters(mapping.mCounters.mTotal);
 
             OutputFormat("| %16s ", "");
-            OutputFormat("| %68s ", "TCP");
+            OutputFormat("| %88s ", "TCP");
             OutputNat64Counters(mapping.mCounters.mTcp);
 
             OutputFormat("| %16s ", "");
-            OutputFormat("| %68s ", "UDP");
+            OutputFormat("| %88s ", "UDP");
             OutputNat64Counters(mapping.mCounters.mUdp);
 
             OutputFormat("| %16s ", "");
-            OutputFormat("| %68s ", "ICMP");
+            OutputFormat("| %88s ", "ICMP");
             OutputNat64Counters(mapping.mCounters.mIcmp);
         }
     }

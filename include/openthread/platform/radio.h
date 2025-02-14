@@ -702,6 +702,10 @@ void otPlatRadioSetRxOnWhenIdle(otInstance *aInstance, bool aEnable);
  *
  * Is used when radio provides OT_RADIO_CAPS_TRANSMIT_SEC capability.
  *
+ * The radio platform should reset the current security MAC frame counter tracked by the radio on this call. While this
+ * is highly recommended, the OpenThread stack, as a safeguard, will also reset the frame counter using the
+ * `otPlatRadioSetMacFrameCounter()` before calling this API.
+ *
  * @param[in]   aInstance    A pointer to an OpenThread instance.
  * @param[in]   aKeyIdMode   The key ID mode.
  * @param[in]   aKeyId       Current MAC key index.
@@ -861,6 +865,17 @@ otError otPlatRadioReceive(otInstance *aInstance, uint8_t aChannel);
 /**
  * Schedule a radio reception window at a specific time and duration.
  *
+ * After a radio reception is successfully scheduled for a future time and duration, a subsequent call to this
+ * function MUST be handled as follows:
+ *
+ * - If the start time of the previously scheduled reception window has not yet been reached, the new call to
+ *   `otPlatRadioReceiveAt()` MUST cancel the previous schedule, effectively replacing it.
+ *
+ * - If the start of the previous window has already passed, the previous receive schedule is already being executed
+ *   by the radio and MUST NOT be replaced or impacted. The new call to `otPlatRadioReceiveAt()` would then schedule
+ *   a new future receive window. In particular, if the new `otPlatRadioReceiveAt()` call occurs after the start
+ *   but while still within the previous reception window, the ongoing reception window MUST NOT be impacted.
+ *
  * @param[in]  aChannel   The radio channel on which to receive.
  * @param[in]  aStart     The receive window start time relative to the local
  *                        radio clock, see `otPlatRadioGetNow`. The radio
@@ -875,7 +890,7 @@ otError otPlatRadioReceive(otInstance *aInstance, uint8_t aChannel);
  *                        reception has either succeeded or failed.
  *
  * @retval OT_ERROR_NONE    Successfully scheduled receive window.
- * @retval OT_ERROR_FAILED  The receive window could not be scheduled.
+ * @retval OT_ERROR_FAILED  The receive window could not be scheduled. For example, if @p aStart is in the past.
  */
 otError otPlatRadioReceiveAt(otInstance *aInstance, uint8_t aChannel, uint32_t aStart, uint32_t aDuration);
 

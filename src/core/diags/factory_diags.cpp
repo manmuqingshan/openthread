@@ -198,9 +198,9 @@ Diags::Diags(Instance &aInstance)
     , mChannel(20)
     , mTxPower(0)
     , mTxLen(0)
+    , mCurTxCmd(kTxCmdNone)
     , mIsTxPacketSet(false)
     , mIsAsyncSend(false)
-    , mRepeatActive(false)
     , mDiagSendOn(false)
     , mOutputCallback(nullptr)
     , mOutputContext(nullptr)
@@ -211,6 +211,7 @@ Diags::Diags(Instance &aInstance)
 void Diags::ResetTxPacket(void)
 {
     mIsHeaderUpdated                               = false;
+    mIsSecurityProcessed                           = false;
     mTxPacket->mInfo.mTxInfo.mTxDelayBaseTime      = 0;
     mTxPacket->mInfo.mTxInfo.mTxDelay              = 0;
     mTxPacket->mInfo.mTxInfo.mMaxCsmaBackoffs      = 0;
@@ -221,7 +222,6 @@ void Diags::ResetTxPacket(void)
     mTxPacket->mInfo.mTxInfo.mIsARetx              = false;
     mTxPacket->mInfo.mTxInfo.mCsmaCaEnabled        = false;
     mTxPacket->mInfo.mTxInfo.mCslPresent           = false;
-    mTxPacket->mInfo.mTxInfo.mIsSecurityProcessed  = false;
 }
 
 Error Diags::ProcessFrame(uint8_t aArgsLength, char *aArgs[])
@@ -312,7 +312,6 @@ Error Diags::ProcessFrame(uint8_t aArgsLength, char *aArgs[])
 
     ResetTxPacket();
     mTxPacket->mInfo.mTxInfo.mCsmaCaEnabled        = csmaCaEnabled;
-    mTxPacket->mInfo.mTxInfo.mIsSecurityProcessed  = securityProcessed;
     mTxPacket->mInfo.mTxInfo.mTxPower              = txPower;
     mTxPacket->mInfo.mTxInfo.mTxDelayBaseTime      = txDelayBaseTime;
     mTxPacket->mInfo.mTxInfo.mTxDelay              = txDelay;
@@ -321,6 +320,7 @@ Error Diags::ProcessFrame(uint8_t aArgsLength, char *aArgs[])
     mTxPacket->mInfo.mTxInfo.mRxChannelAfterTxDone = rxChannelAfterTxDone;
     mTxPacket->mLength                             = size;
     mIsHeaderUpdated                               = isHeaderUpdated;
+    mIsSecurityProcessed                           = securityProcessed;
     mIsTxPacketSet                                 = true;
 
 exit:
@@ -343,8 +343,12 @@ Error Diags::ProcessChannel(uint8_t aArgsLength, char *aArgs[])
         VerifyOrExit(IsChannelValid(channel), error = kErrorInvalidArgs);
 
         mChannel = channel;
-        IgnoreError(Get<Radio>().Receive(mChannel));
         otPlatDiagChannelSet(mChannel);
+
+        if (!mIsSleepOn)
+        {
+            IgnoreError(Get<Radio>().Receive(mChannel));
+        }
     }
 
 exit:
@@ -383,7 +387,7 @@ Error Diags::ProcessRepeat(uint8_t aArgsLength, char *aArgs[])
     if (StringMatch(aArgs[0], "stop"))
     {
         otPlatAlarmMilliStop(&GetInstance());
-        mRepeatActive = false;
+        mCurTxCmd = kTxCmdNone;
     }
     else
     {
@@ -391,6 +395,7 @@ Error Diags::ProcessRepeat(uint8_t aArgsLength, char *aArgs[])
         uint8_t  txLength;
 
         VerifyOrExit(aArgsLength >= 1, error = kErrorInvalidArgs);
+        VerifyOrExit(mCurTxCmd == kTxCmdNone, error = kErrorInvalidState);
 
         SuccessOrExit(error = Utils::CmdLineParser::ParseAsUint32(aArgs[0], txPeriod));
         mTxPeriod = txPeriod;
@@ -411,11 +416,10 @@ Error Diags::ProcessRepeat(uint8_t aArgsLength, char *aArgs[])
 
         VerifyOrExit((txLength >= OT_RADIO_FRAME_MIN_SIZE) && (txLength <= OT_RADIO_FRAME_MAX_SIZE),
                      error = kErrorInvalidArgs);
-        mTxLen = txLength;
 
-        mRepeatActive = true;
-        uint32_t now  = otPlatAlarmMilliGetNow();
-        otPlatAlarmMilliStartAt(&GetInstance(), now, mTxPeriod);
+        mTxLen    = txLength;
+        mCurTxCmd = kTxCmdRepeat;
+        otPlatAlarmMilliStartAt(&GetInstance(), otPlatAlarmMilliGetNow(), mTxPeriod);
     }
 
 exit:
@@ -429,6 +433,7 @@ Error Diags::ProcessSend(uint8_t aArgsLength, char *aArgs[])
     uint8_t  txLength;
 
     VerifyOrExit(aArgsLength >= 1, error = kErrorInvalidArgs);
+    VerifyOrExit(mCurTxCmd == kTxCmdNone, error = kErrorInvalidState);
 
     if (StringMatch(aArgs[0], "async"))
     {
@@ -464,6 +469,7 @@ Error Diags::ProcessSend(uint8_t aArgsLength, char *aArgs[])
     mTxLen = txLength;
 
     SuccessOrExit(error = TransmitPacket());
+    mCurTxCmd = kTxCmdSend;
 
     if (!mIsAsyncSend)
     {
@@ -555,9 +561,10 @@ Error Diags::TransmitPacket(void)
 
     if (mIsTxPacketSet)
     {
-        // The `mInfo.mTxInfo.mIsHeaderUpdated` field may be updated by the radio driver after the frame is sent,
-        // set the `mInfo.mTxInfo.mIsHeaderUpdated` field before transmitting the frame.
-        mTxPacket->mInfo.mTxInfo.mIsHeaderUpdated = mIsHeaderUpdated;
+        // The `mInfo.mTxInfo.mIsHeaderUpdated` and `mInfo.mTxInfo.mIsSecurityProcessed` fields may be updated by
+        // the radio driver after the frame is sent. Here sets these fields field before transmitting the frame.
+        mTxPacket->mInfo.mTxInfo.mIsHeaderUpdated     = mIsHeaderUpdated;
+        mTxPacket->mInfo.mTxInfo.mIsSecurityProcessed = mIsSecurityProcessed;
     }
     else
     {
@@ -570,12 +577,14 @@ Error Diags::TransmitPacket(void)
         }
     }
 
-    mDiagSendOn = true;
-    error       = Get<Radio>().Transmit(*static_cast<Mac::TxFrame *>(mTxPacket));
-
-    if (error == kErrorInvalidState)
+    error = Get<Radio>().Transmit(*static_cast<Mac::TxFrame *>(mTxPacket));
+    if (error == kErrorNone)
     {
-        mStats.mSentErrorInvalidStatePackets++;
+        mDiagSendOn = true;
+    }
+    else
+    {
+        UpdateTxStats(error);
     }
 
     return error;
@@ -620,6 +629,7 @@ Error Diags::RadioReceive(void)
     SuccessOrExit(error = Get<Radio>().SetTransmitPower(mTxPower));
     otPlatDiagChannelSet(mChannel);
     otPlatDiagTxPowerSet(mTxPower);
+    mIsSleepOn = false;
 
 exit:
     return error;
@@ -634,6 +644,7 @@ Error Diags::ProcessRadio(uint8_t aArgsLength, char *aArgs[])
     if (StringMatch(aArgs[0], "sleep"))
     {
         SuccessOrExit(error = Get<Radio>().Sleep());
+        mIsSleepOn = true;
     }
     else if (StringMatch(aArgs[0], "receive"))
     {
@@ -771,7 +782,7 @@ extern "C" void otPlatDiagAlarmFired(otInstance *aInstance) { AsCoreType(aInstan
 
 void Diags::AlarmFired(void)
 {
-    if (mRepeatActive)
+    if (mCurTxCmd == kTxCmdRepeat)
     {
         uint32_t now = otPlatAlarmMilliGetNow();
 
@@ -861,26 +872,13 @@ void Diags::TransmitDone(Error aError)
     VerifyOrExit(mDiagSendOn);
     mDiagSendOn = false;
 
-    switch (aError)
+    if (mIsSleepOn)
     {
-    case kErrorNone:
-        mStats.mSentSuccessPackets++;
-        break;
-
-    case kErrorChannelAccessFailure:
-        mStats.mSentErrorCcaPackets++;
-        break;
-
-    case kErrorAbort:
-        mStats.mSentErrorAbortPackets++;
-        break;
-
-    default:
-        mStats.mSentErrorOthersPackets++;
-        break;
+        IgnoreError(Get<Radio>().Sleep());
     }
 
-    VerifyOrExit(!mRepeatActive && (mTxPackets > 0));
+    UpdateTxStats(aError);
+    VerifyOrExit((mCurTxCmd == kTxCmdSend) && (mTxPackets > 0));
 
     if (mTxPackets > 1)
     {
@@ -890,6 +888,7 @@ void Diags::TransmitDone(Error aError)
     else
     {
         mTxPackets = 0;
+        mCurTxCmd  = kTxCmdNone;
 
         if (!mIsAsyncSend)
         {
@@ -913,6 +912,32 @@ bool Diags::ShouldHandleReceivedFrame(const otRadioFrame &aFrame) const
 
 exit:
     return ret;
+}
+
+void Diags::UpdateTxStats(Error aError)
+{
+    switch (aError)
+    {
+    case kErrorNone:
+        mStats.mSentSuccessPackets++;
+        break;
+
+    case kErrorChannelAccessFailure:
+        mStats.mSentErrorCcaPackets++;
+        break;
+
+    case kErrorAbort:
+        mStats.mSentErrorAbortPackets++;
+        break;
+
+    case kErrorInvalidState:
+        mStats.mSentErrorInvalidStatePackets++;
+        break;
+
+    default:
+        mStats.mSentErrorOthersPackets++;
+        break;
+    }
 }
 
 #endif // OPENTHREAD_RADIO

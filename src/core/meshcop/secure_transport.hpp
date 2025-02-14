@@ -100,7 +100,7 @@ class Tls;
 /**
  * Represents a secure session.
  */
-class SecureSession : private LinkedListEntry<SecureSession>, private NonCopyable
+class SecureSession : public LinkedListEntry<SecureSession>, private NonCopyable
 {
     friend class LinkedListEntry<SecureSession>;
     friend class LinkedList<SecureSession>;
@@ -435,6 +435,19 @@ public:
 #endif // defined(MBEDTLS_BASE64_C) && defined(MBEDTLS_SSL_KEEP_PEER_CERTIFICATE)
 
 #if defined(MBEDTLS_SSL_KEEP_PEER_CERTIFICATE)
+        /**
+         * Returns the DER encoded peer x509 certificate.
+         *
+         * @param[out]  aPeerCert        A pointer to the DER encoded certificate buffer.
+         * @param[out]  aCertLength      The length of the DER encoded peer certificate.
+         * @param[in]   aCertBufferSize  The buffer size of aPeerCert.
+         *
+         * @retval kErrorInvalidState   Not connected yet.
+         * @retval kErrorNone           Successfully get the peer certificate.
+         * @retval kErrorNoBufs         Can't allocate memory for certificate.
+         */
+        Error GetPeerCertificateDer(unsigned char *aPeerCert, size_t *aCertLength, size_t aCertBufferSize);
+
         /**
          * Returns an attribute value identified by its OID from the subject
          * of the peer x509 certificate. The peer OID is provided in binary format.
